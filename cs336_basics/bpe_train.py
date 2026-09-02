@@ -65,7 +65,7 @@ def cam_train_bpe(
 
     # Treat delimiters specially up front
     for delimiter in special_tokens:
-        token_to_bytes[len(token_to_bytes)] = delimiter
+        token_to_bytes[len(token_to_bytes)] = delimiter.encode('utf-8')
 
     # Start BPE process
     start_frequency_table_size = len(final_freq_map)
@@ -90,16 +90,22 @@ def cam_train_bpe(
                     merge_counter[tup] = 1 * value
         
         # Find maximum byte pair occurence in merge_counter
-        top_pair = None
+        pair_candidates: list[tuple[bytes, ...]] = []
         top_count = 0
         for pair, count in merge_counter.items():
             if count > top_count:
                 top_count = count
-                top_pair = pair
+                pair_candidates = [pair]
+            elif count == top_count:
+                pair_candidates.append(pair)
 
-        if top_pair is None:
+        if len(pair_candidates) == 0:
             print("Nothing left to merge")
             break
+
+        # Determine top_pair if there are ties as top lexicographical pair
+        pair_candidates.sort()
+        top_pair = pair_candidates[-1]
 
         # Add to merge list
         merge_list.append(top_pair)
@@ -135,4 +141,10 @@ def cam_train_bpe(
 
         # Update token_to_bytes mapping with new token ID and merged bytes
         token_to_bytes[len(token_to_bytes)] = top_pair[0] + top_pair[1]
+    
+    # Verify
+    for key, value in token_to_bytes.items():
+        assert type(key) == int
+        assert type(value) == bytes
+
     return token_to_bytes, merge_list

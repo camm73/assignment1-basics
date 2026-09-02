@@ -5,10 +5,8 @@ from pretokenization_example import find_chunk_boundaries
 
 # assign initial token IDs to all possible 1-byte values
 token_to_bytes: Dict[int, bytes] = {}
-bytes_to_token = Dict[bytes, int] = {}
 for i in range(256):
     token_to_bytes[i] = bytes([i])
-    bytes_to_token[bytes([i])] = i
 
 # Add delimiter as special token
 DELIMITER = b'<|endoftext|>'
@@ -16,46 +14,87 @@ token_to_bytes[len(token_to_bytes)] = DELIMITER
 
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 
-
-def read_until_delimiter(f: BinaryIO, delimiter: bytes) -> bytes:
-    CHUNK_SIZE = 1 * 1024 # 1 KiB
-    tmp_string: bytearray = []
-    while True:
-        start_cursor = f.tell()
-        chunk = f.read(CHUNK_SIZE)
-
-        if chunk == b'':
-            return bytes(tmp_string)
-        
-        found_at = chunk.find(delimiter)
-        if found_at != -1:
-            tmp_string.extend(chunk[:found_at])
-            f.seek(start_cursor + found_at + len(delimiter))
-            return bytes(tmp_string)
-        
-        tmp_string.extend(chunk)
-
-
 # Open training data in split into chunks
 chunk_boundaries: list[int]
 with open('../data/TinyStoriesV2-GPT4-valid.txt', 'rb') as f:
     chunk_boundaries = find_chunk_boundaries(f, 8, DELIMITER)
 
+# Construct frequency table for the file
 frequency_table: dict[tuple[bytes, ...], int] = {}
-with open('../data/TinyStoriesV2-GPT4-valid.txt', 'rb') as f:
-    while True:
-        # Read until we find a delimiter
-        output = read_until_delimiter(f, DELIMITER)
-
-        if output == b'':
-            break
-
-        # Process the portion before the delimiter
-        for group in re.findall(PAT, output.decode('utf-8')):
-            group_byte = tuple(group.encode('utf-8'))
-            if group_byte in frequency_table:
-                frequency_table[group_byte] += 1
+delimiter_list: list[str] = [DELIMITER.decode()]
+with open('../data/TinyStoriesV2-GPT4-valid.txt', 'r') as f:
+    read_data = f.read()
+    segments = re.split("|".join(map(re.escape, delimiter_list)), read_data)
+    for seg in segments:
+        for group in re.finditer(PAT, seg):
+            group_tup = tuple(bytes([b]) for b in group.group().encode('utf-8'))
+            if group_tup in frequency_table:
+                frequency_table[group_tup] += 1
             else:
-                frequency_table[group_byte] = 1
+                frequency_table[group_tup] = 1
 
-print(frequency_table)
+start_frequency_table_size = len(frequency_table)
+VOCAB_SIZE = 1000
+while len(token_to_bytes) < VOCAB_SIZE:
+    merge_counter: dict[tuple[bytes, ...], int] = {}
+
+    assert len(frequency_table) == start_frequency_table_size
+
+    # Count byte pair occurences and multiple by frequency in freq table
+    for key, value in frequency_table.items():
+        for i in range(len(key) - 1):
+            one = key[i]
+            two = key[i+1]
+            tup = (one, two)
+            assert type(one) == bytes
+            assert type(two) == bytes
+
+            if tup in merge_counter:
+                merge_counter[tup] += 1 * value
+            else:
+                merge_counter[tup] = 1 * value
+    
+    # Find maximum byte pair occurence in merge_counter
+    top_pair = None
+    top_count = 0
+    for pair, count in merge_counter.items():
+        if count > top_count:
+            top_count = count
+            top_pair = pair
+
+    if top_pair is None:
+        print("Nothing left to merge")
+        break
+
+    # Replace instances of byte pair in frequency_table with new merged pair
+    new_frequency_table: dict[tuple[bytes, ...], int] = {}
+    for key, value in frequency_table.items():
+        new_key: list[bytes] = []
+        i = 0
+        while i < len(key):
+            one = key[i]
+            # Need to handle case where we only have one character left
+            if i == len(key) - 1:
+                new_key.extend([one])
+                break
+
+            two = key[i+1]
+            tup = (one, two)
+
+            # if we find a pair, merge the bytes
+            if tup == top_pair:
+                new_key.extend([one + two])
+                i += 2
+            else:
+                new_key.extend([one])
+                i += 1
+
+        # we'll keep the same value here, just replacing with the new key
+        new_frequency_table[tuple(new_key)] = value
+
+    # once done, we'll replace the old frequency map
+    frequency_table = new_frequency_table
+
+    # Update token_to_bytes mapping with new token ID and merged bytes
+    print(f'Merging {top_pair[0]} and {top_pair[1]}')
+    token_to_bytes[len(token_to_bytes)] = top_pair[0] + top_pair[1]

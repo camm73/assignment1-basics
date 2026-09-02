@@ -8,16 +8,12 @@ PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s
 
 def cam_generate_frequency_map(
     input_path: str | os.PathLike,
-    start_index: int,
-    end_index: int,
     delimiters: list[str]
 ) -> dict[tuple[bytes, ...], int]:
     frequency_table: dict[tuple[bytes, ...], int] = {}
     with open(input_path, 'r') as f:
-        f.seek(start_index)
-
         # NOTE: Will need to chunk this further for larger files to avoid excessive memory usage
-        read_data = f.read(end_index - start_index)
+        read_data = f.read()
         segments = re.split("|".join(map(re.escape, delimiters)), read_data)
         for seg in segments:
             for group in re.finditer(PAT, seg):
@@ -36,26 +32,7 @@ def cam_train_bpe(
     special_tokens: list[str],
     **kwargs,):
     assert len(special_tokens) > 0
-
-    # First we'll determine the pretokenization splits
-    chunk_boundaries: list[int]
-    with open(input_path, 'rb') as f:
-        # TODO: Currently just using first special token, but this should be changed to use all
-        chunk_boundaries = find_chunk_boundaries(f, 8, special_tokens[0].encode('utf-8'))
-
-    # Process each chunk into a frequency map in parallel
-    frequency_maps: list[dict[tuple[bytes, ...], int]] = []
-    for start, end in zip(chunk_boundaries[:-1], chunk_boundaries[1:]):
-        frequency_maps.append(cam_generate_frequency_map(input_path, start, end, special_tokens))
-    
-    # Merge all frequency maps into one
-    final_freq_map: dict[tuple[bytes, ...], int] = {}
-    for freq_map in frequency_maps:
-        for key, value in freq_map.items():
-            if key in final_freq_map:
-                final_freq_map[key] = final_freq_map[key] + value
-            else:
-                final_freq_map[key] = value
+    final_freq_map = cam_generate_frequency_map(input_path, special_tokens)
 
     # init for BPE process
     # assign initial token IDs to all possible 1-byte values

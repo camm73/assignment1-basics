@@ -1,20 +1,22 @@
-from typing import Dict
+from typing import Dict, BinaryIO
 import regex as re
-from torch import special
-from cs336_basics.pretokenization_example import find_chunk_boundaries
 import os
 
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 
 def cam_generate_frequency_map(
     input_path: str | os.PathLike,
+    start_index: int,
+    end_index: int,
     delimiters: list[str]
 ) -> dict[tuple[bytes, ...], int]:
     frequency_table: dict[tuple[bytes, ...], int] = {}
-    with open(input_path, 'r') as f:
-        # NOTE: Will need to chunk this further for larger files to avoid excessive memory usage
-        read_data = f.read()
-        segments = re.split("|".join(map(re.escape, delimiters)), read_data)
+    with open(input_path, 'rb') as f:
+        f.seek(start_index)
+        read_data = f.read(end_index - start_index)
+        text_data = read_data.decode('utf-8')
+
+        segments = re.split("|".join(map(re.escape, delimiters)), text_data)
         for seg in segments:
             for group in re.finditer(PAT, seg):
                 group_tup = tuple(bytes([b]) for b in group.group().encode('utf-8'))
@@ -25,6 +27,46 @@ def cam_generate_frequency_map(
     
     return frequency_table
 
+def find_chunk_boundaries(
+    file: BinaryIO,
+    desired_num_chunks: int,
+    split_special_tokens: list[str],
+) -> list[int]:
+    file.seek(0, os.SEEK_END)
+    file_size = file.tell()
+    file.seek(0)
+
+    chunk_size = file_size // desired_num_chunks
+
+    chunk_boundaries = [i * chunk_size for i in range(desired_num_chunks + 1)]
+    chunk_boundaries[-1] = file_size
+
+    mini_chunk_size = 4096
+
+    # Convert special tokens to bytes and build pattern for binary matching
+    special_tokens_bytes = [token.encode('utf-8') for token in split_special_tokens]
+    pattern = b"|".join(map(re.escape, special_tokens_bytes))
+
+    for bi in range(1, len(chunk_boundaries) - 1):
+        initial_position = chunk_boundaries[bi]
+        file.seek(initial_position)
+        while True:
+            mini_chunk = file.read(mini_chunk_size)
+
+            if mini_chunk == b"":
+                chunk_boundaries[bi] = file_size
+                break
+
+            # Search for special tokens directly in binary data
+            match = re.search(pattern, mini_chunk)
+            if match:
+                chunk_boundaries[bi] = initial_position + match.end()
+                break
+
+            initial_position += mini_chunk_size
+
+    return sorted(set(chunk_boundaries))
+
 
 def cam_train_bpe(
     input_path: str | os.PathLike,
@@ -32,7 +74,26 @@ def cam_train_bpe(
     special_tokens: list[str],
     **kwargs,):
     assert len(special_tokens) > 0
-    final_freq_map = cam_generate_frequency_map(input_path, special_tokens)
+
+    # First we'll determine the pretokenization splits
+    chunk_boundaries: list[int]
+    with open(input_path, 'rb') as f:
+        # TODO: Currently just using first special token, but this should be changed to use all
+        chunk_boundaries = find_chunk_boundaries(f, 2, special_tokens)
+
+    # Process each chunk into a frequency map in parallel
+    frequency_maps: list[dict[tuple[bytes, ...], int]] = []
+    for start, end in zip(chunk_boundaries[:-1], chunk_boundaries[1:]):
+        frequency_maps.append(cam_generate_frequency_map(input_path, start, end, special_tokens))
+
+    # Merge all frequency maps into one
+    final_freq_map: dict[tuple[bytes, ...], int] = {}
+    for freq_map in frequency_maps:
+        for key, value in freq_map.items():
+            if key in final_freq_map:
+                final_freq_map[key] += value
+            else:
+                final_freq_map[key] = value
 
     # init for BPE process
     # assign initial token IDs to all possible 1-byte values
